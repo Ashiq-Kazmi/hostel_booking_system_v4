@@ -1,445 +1,322 @@
-import sqlite3
 import os
-from flask import Flask, render_template, request, redirect, url_for, session, flash, g
+from decimal import Decimal, InvalidOperation
+from functools import wraps
+from flask import Flask, render_template, request, redirect, url_for, session, flash
+from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import CheckConstraint, UniqueConstraint, func, or_
+from sqlalchemy.exc import IntegrityError
 from werkzeug.security import generate_password_hash, check_password_hash
-from werkzeug.utils import secure_filename
 
-app = Flask(__name__)
-app.secret_key = 'your_secret_key_here'  # Change this to a random secret key
-app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
 
-# Ensure upload folder exists
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+db = SQLAlchemy()
 
-def get_db():
-    if 'db' not in g:
-        g.db = sqlite3.connect('database.db')
-        g.db.row_factory = sqlite3.Row
-    return g.db
+class Student(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(120), nullable=False)
+    email = db.Column(db.String(255), unique=True, nullable=False, index=True)
+    password = db.Column(db.String(255), nullable=False)
+    phone = db.Column(db.String(40))
+    university = db.Column(db.String(160))
+    bookings = db.relationship('Booking', back_populates='student', cascade='all, delete-orphan')
+    reviews = db.relationship('Review', back_populates='student', cascade='all, delete-orphan')
 
-@app.teardown_appcontext
-def close_db(error):
-    if hasattr(g, 'db'):
-        g.db.close()
+class SuperAdmin(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(80), unique=True, nullable=False)
+    password = db.Column(db.String(255), nullable=False)
 
-def init_db():
-    db = get_db()
-    with app.open_resource('schema.sql', mode='r') as f:
-        db.cursor().executescript(f.read())
-    db.commit()
+class HostelAdmin(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    full_name = db.Column(db.String(120), nullable=False)
+    email = db.Column(db.String(255), unique=True, nullable=False, index=True)
+    password = db.Column(db.String(255), nullable=False)
+    phone = db.Column(db.String(40))
+    hostels = db.relationship('Hostel', back_populates='owner', cascade='all, delete-orphan')
 
-@app.cli.command('initdb')
-def initdb_command():
-    init_db()
-    print('Initialized the database.')
+class Hostel(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    hostel_admin_id = db.Column(db.Integer, db.ForeignKey('hostel_admin.id', ondelete='CASCADE'), nullable=False)
+    name = db.Column(db.String(160), nullable=False)
+    location = db.Column(db.String(255), nullable=False)
+    price = db.Column(db.Numeric(12, 2), nullable=False)
+    seats = db.Column(db.Integer, nullable=False)
+    room_type = db.Column(db.String(80), nullable=False)
+    distance_km = db.Column(db.Numeric(8, 2), nullable=False, default=0)
+    description = db.Column(db.Text)
+    image_url = db.Column(db.String(500))
+    map_link = db.Column(db.String(500))
+    listing_status = db.Column(db.String(20), nullable=False, default='inactive')
+    payment_status = db.Column(db.String(20), nullable=False, default='unpaid')
+    created_at = db.Column(db.DateTime, server_default=func.now(), nullable=False)
+    owner = db.relationship('HostelAdmin', back_populates='hostels')
+    bookings = db.relationship('Booking', back_populates='hostel', cascade='all, delete-orphan')
+    reviews = db.relationship('Review', back_populates='hostel', cascade='all, delete-orphan')
+    payments = db.relationship('Payment', back_populates='hostel', cascade='all, delete-orphan')
+    __table_args__ = (CheckConstraint('price >= 0', name='ck_hostel_price'), CheckConstraint('seats >= 0', name='ck_hostel_seats'))
 
-def query_db(query, args=(), one=False):
-    cur = get_db().execute(query, args)
-    rv = cur.fetchall()
-    cur.close()
-    return (rv[0] if rv else None) if one else rv
+class Booking(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    student_id = db.Column(db.Integer, db.ForeignKey('student.id', ondelete='CASCADE'), nullable=False)
+    hostel_id = db.Column(db.Integer, db.ForeignKey('hostel.id', ondelete='CASCADE'), nullable=False)
+    status = db.Column(db.String(20), nullable=False, default='pending')
+    booking_date = db.Column(db.DateTime, server_default=func.now(), nullable=False)
+    student = db.relationship('Student', back_populates='bookings')
+    hostel = db.relationship('Hostel', back_populates='bookings')
 
-def insert_db(query, args=()):
-    db = get_db()
-    cur = db.execute(query, args)
-    db.commit()
-    return cur.lastrowid
+class Payment(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    hostel_id = db.Column(db.Integer, db.ForeignKey('hostel.id', ondelete='CASCADE'), nullable=False)
+    hostel_admin_id = db.Column(db.Integer, db.ForeignKey('hostel_admin.id', ondelete='CASCADE'), nullable=False)
+    amount = db.Column(db.Numeric(12, 2), nullable=False)
+    payment_method = db.Column(db.String(80), nullable=False)
+    transaction_ref = db.Column(db.String(160))
+    verification_status = db.Column(db.String(20), nullable=False, default='pending')
+    payment_date = db.Column(db.DateTime, server_default=func.now(), nullable=False)
+    hostel = db.relationship('Hostel', back_populates='payments')
+    hostel_admin = db.relationship('HostelAdmin')
 
-@app.route("/")
-def home():
-    hostels = query_db('SELECT * FROM hostels WHERE listing_status = "active" LIMIT 6')
-    return render_template('index.html', hostels=hostels)
+class Review(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    student_id = db.Column(db.Integer, db.ForeignKey('student.id', ondelete='CASCADE'), nullable=False)
+    hostel_id = db.Column(db.Integer, db.ForeignKey('hostel.id', ondelete='CASCADE'), nullable=False)
+    rating = db.Column(db.Integer, nullable=False)
+    comment = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, server_default=func.now(), nullable=False)
+    student = db.relationship('Student', back_populates='reviews')
+    hostel = db.relationship('Hostel', back_populates='reviews')
+    __table_args__ = (CheckConstraint('rating BETWEEN 1 AND 5', name='ck_review_rating'), UniqueConstraint('student_id', 'hostel_id', name='uq_review_student_hostel'))
 
-# Student routes
-@app.route("/student/register", methods=['GET', 'POST'])
-def student_register():
-    if request.method == 'POST':
-        name = request.form['name']
-        email = request.form['email']
-        password = generate_password_hash(request.form['password'])
-        phone = request.form['phone']
-        university = request.form['university']
-        
-        try:
-            insert_db('INSERT INTO students (name, email, password, phone, university) VALUES (?, ?, ?, ?, ?)',
-                     [name, email, password, phone, university])
-            flash('Registration successful! Please login.', 'success')
-            return redirect(url_for('student_login'))
-        except sqlite3.IntegrityError:
-            flash('Email already exists.', 'error')
-    
-    return render_template('student_register.html')
 
-@app.route("/student/login", methods=['GET', 'POST'])
-def student_login():
-    if request.method == 'POST':
-        email = request.form['email']
-        password = request.form['password']
-        
-        user = query_db('SELECT * FROM students WHERE email = ?', [email], one=True)
-        if user and check_password_hash(user['password'], password):
-            session['user_id'] = user['id']
-            session['user_type'] = 'student'
-            return redirect(url_for('home'))
+def role_required(role):
+    def decorator(view):
+        @wraps(view)
+        def wrapped(*args, **kwargs):
+            if session.get('role') != role:
+                flash('Please sign in to continue.', 'warning')
+                return redirect(url_for({'student':'student_login','hostel_admin':'hostel_admin_login','admin':'admin_login'}[role]))
+            return view(*args, **kwargs)
+        return wrapped
+    return decorator
+
+
+def create_app():
+    app = Flask(__name__)
+    database_url = os.environ.get('DATABASE_URL', 'sqlite:///hostel_booking.db')
+    if database_url.startswith('postgres://'):
+        database_url = database_url.replace('postgres://', 'postgresql+psycopg://', 1)
+    app.config.update(SECRET_KEY=os.environ.get('SECRET_KEY'), SQLALCHEMY_DATABASE_URI=database_url, SQLALCHEMY_TRACK_MODIFICATIONS=False)
+    if not app.config['SECRET_KEY']:
+        raise RuntimeError('SECRET_KEY environment variable is required')
+    db.init_app(app)
+
+    @app.cli.command('init-db')
+    def init_db():
+        with app.app_context():
+            db.create_all()
+            username = os.environ.get('ADMIN_USERNAME')
+            password = os.environ.get('ADMIN_PASSWORD')
+            if username and password and not SuperAdmin.query.filter_by(username=username).first():
+                db.session.add(SuperAdmin(username=username, password=generate_password_hash(password)))
+                db.session.commit()
+        print('Database initialized. No demo data was created.')
+
+    @app.route('/')
+    def home():
+        hostels = Hostel.query.filter_by(listing_status='active').order_by(Hostel.created_at.desc()).limit(6).all()
+        return render_template('home.html', hostels=hostels)
+
+    @app.route('/hostels')
+    def hostels():
+        q = request.args.get('q', '').strip()
+        room_type = request.args.get('room_type', '').strip()
+        query = Hostel.query.filter_by(listing_status='active')
+        if q:
+            query = query.filter(or_(Hostel.name.ilike(f'%{q}%'), Hostel.location.ilike(f'%{q}%')))
+        if room_type:
+            query = query.filter_by(room_type=room_type)
+        return render_template('hostels.html', hostels=query.order_by(Hostel.created_at.desc()).all(), q=q, room_type=room_type)
+
+    @app.route('/hostel/<int:hostel_id>')
+    def hostel_detail(hostel_id):
+        hostel = db.get_or_404(Hostel, hostel_id)
+        if hostel.listing_status != 'active' and not (session.get('role') == 'admin' or session.get('user_id') == hostel.hostel_admin_id):
+            flash('This hostel is not currently available.', 'warning')
+            return redirect(url_for('hostels'))
+        avg = db.session.query(func.avg(Review.rating)).filter_by(hostel_id=hostel.id).scalar() or 0
+        return render_template('hostel_detail.html', hostel=hostel, avg_rating=round(float(avg), 1))
+
+    @app.route('/student/register', methods=['GET','POST'])
+    def student_register():
+        if request.method == 'POST':
+            email = request.form.get('email','').strip().lower(); password = request.form.get('password','').strip()
+            if not request.form.get('name','').strip() or not email or len(password) < 8:
+                flash('Name, email and a password of at least 8 characters are required.', 'danger')
+            else:
+                try:
+                    db.session.add(Student(name=request.form['name'].strip(), email=email, password=generate_password_hash(password), phone=request.form.get('phone','').strip(), university=request.form.get('university','').strip()))
+                    db.session.commit(); flash('Account created successfully.', 'success'); return redirect(url_for('student_login'))
+                except IntegrityError:
+                    db.session.rollback(); flash('An account with this email already exists.', 'danger')
+        return render_template('auth.html', mode='student_register')
+
+    @app.route('/student/login', methods=['GET','POST'])
+    def student_login():
+        if request.method == 'POST':
+            user = Student.query.filter_by(email=request.form.get('email','').strip().lower()).first()
+            if user and check_password_hash(user.password, request.form.get('password','')):
+                session.clear(); session.update(user_id=user.id, role='student'); return redirect(url_for('home'))
+            flash('Invalid email or password.', 'danger')
+        return render_template('auth.html', mode='student_login')
+
+    @app.route('/hostel-admin/register', methods=['GET','POST'])
+    def hostel_admin_register():
+        if request.method == 'POST':
+            email = request.form.get('email','').strip().lower(); password = request.form.get('password','').strip()
+            if not request.form.get('full_name','').strip() or not email or len(password) < 8:
+                flash('Name, email and a password of at least 8 characters are required.', 'danger')
+            else:
+                try:
+                    db.session.add(HostelAdmin(full_name=request.form['full_name'].strip(), email=email, password=generate_password_hash(password), phone=request.form.get('phone','').strip()))
+                    db.session.commit(); flash('Owner account created successfully.', 'success'); return redirect(url_for('hostel_admin_login'))
+                except IntegrityError:
+                    db.session.rollback(); flash('An account with this email already exists.', 'danger')
+        return render_template('auth.html', mode='hostel_admin_register')
+
+    @app.route('/hostel-admin/login', methods=['GET','POST'])
+    def hostel_admin_login():
+        if request.method == 'POST':
+            user = HostelAdmin.query.filter_by(email=request.form.get('email','').strip().lower()).first()
+            if user and check_password_hash(user.password, request.form.get('password','')):
+                session.clear(); session.update(user_id=user.id, role='hostel_admin'); return redirect(url_for('hostel_admin_dashboard'))
+            flash('Invalid email or password.', 'danger')
+        return render_template('auth.html', mode='hostel_admin_login')
+
+    @app.route('/admin/login', methods=['GET','POST'])
+    def admin_login():
+        if request.method == 'POST':
+            user = SuperAdmin.query.filter_by(username=request.form.get('username','').strip()).first()
+            if user and check_password_hash(user.password, request.form.get('password','')):
+                session.clear(); session.update(user_id=user.id, role='admin'); return redirect(url_for('admin_dashboard'))
+            flash('Invalid administrator credentials.', 'danger')
+        return render_template('auth.html', mode='admin_login')
+
+    @app.route('/logout')
+    def logout():
+        session.clear(); return redirect(url_for('home'))
+
+    @app.route('/booking/<int:hostel_id>', methods=['POST'])
+    @role_required('student')
+    def booking(hostel_id):
+        hostel = db.get_or_404(Hostel, hostel_id)
+        if hostel.listing_status != 'active' or hostel.seats <= 0:
+            flash('This hostel is not available or has no seats.', 'danger'); return redirect(url_for('hostel_detail', hostel_id=hostel.id))
+        existing = Booking.query.filter(Booking.student_id==session['user_id'], Booking.hostel_id==hostel.id, Booking.status.in_(['pending','approved'])).first()
+        if existing:
+            flash('You already have an active booking for this hostel.', 'warning'); return redirect(url_for('my_bookings'))
+        hostel.seats -= 1
+        db.session.add(Booking(student_id=session['user_id'], hostel_id=hostel.id)); db.session.commit()
+        flash('Booking request submitted.', 'success'); return redirect(url_for('my_bookings'))
+
+    @app.route('/my-bookings')
+    @role_required('student')
+    def my_bookings():
+        return render_template('student_dashboard.html', bookings=Booking.query.filter_by(student_id=session['user_id']).order_by(Booking.booking_date.desc()).all())
+
+    @app.route('/review/<int:hostel_id>', methods=['POST'])
+    @role_required('student')
+    def review(hostel_id):
+        db.get_or_404(Hostel, hostel_id)
+        try: rating = int(request.form.get('rating','0'))
+        except ValueError: rating = 0
+        if rating not in range(1,6):
+            flash('Rating must be between 1 and 5.', 'danger')
+        elif Review.query.filter_by(student_id=session['user_id'], hostel_id=hostel_id).first():
+            flash('You have already reviewed this hostel.', 'warning')
         else:
-            flash('Invalid credentials.', 'error')
-    
-    return render_template('student_login.html')
-
-@app.route("/student/logout")
-def student_logout():
-    session.clear()
-    return redirect(url_for('home'))
-
-# Hostel admin routes
-@app.route("/hostel-admin/register", methods=['GET', 'POST'])
-def hostel_admin_register():
-    if request.method == 'POST':
-        full_name = request.form['full_name']
-        email = request.form['email']
-        password = generate_password_hash(request.form['password'])
-        phone = request.form['phone']
-        
-        try:
-            insert_db('INSERT INTO hostel_admins (full_name, email, password, phone) VALUES (?, ?, ?, ?)',
-                     [full_name, email, password, phone])
-            flash('Registration successful! Please login.', 'success')
-            return redirect(url_for('hostel_admin_login'))
-        except sqlite3.IntegrityError:
-            flash('Email already exists.', 'error')
-    
-    return render_template('hostel_admin_register.html')
-
-@app.route("/hostel-admin/login", methods=['GET', 'POST'])
-def hostel_admin_login():
-    if request.method == 'POST':
-        email = request.form['email']
-        password = request.form['password']
-        
-        user = query_db('SELECT * FROM hostel_admins WHERE email = ?', [email], one=True)
-        if user and check_password_hash(user['password'], password):
-            session['user_id'] = user['id']
-            session['user_type'] = 'hostel_admin'
-            return redirect(url_for('hostel_admin_dashboard'))
-        else:
-            flash('Invalid credentials.', 'error')
-    
-    return render_template('hostel_admin_login.html')
-
-@app.route("/hostel-admin/logout")
-def hostel_admin_logout():
-    session.clear()
-    return redirect(url_for('home'))
-
-@app.route("/hostel-admin/dashboard")
-def hostel_admin_dashboard():
-    if 'user_type' not in session or session['user_type'] != 'hostel_admin':
-        return redirect(url_for('hostel_admin_login'))
-    
-    hostels = query_db('SELECT * FROM hostels WHERE hostel_admin_id = ?', [session['user_id']])
-    return render_template('hostel_admin_dashboard.html', hostels=hostels)
-
-# Admin routes
-@app.route("/admin/login", methods=['GET', 'POST'])
-def admin_login():
-    if request.method == 'POST':
-        username = request.form['username']
-        password = request.form['password']
-        
-        user = query_db('SELECT * FROM super_admins WHERE username = ?', [username], one=True)
-        if user and check_password_hash(user['password'], password):
-            session['user_id'] = user['id']
-            session['user_type'] = 'admin'
-            return redirect(url_for('admin_dashboard'))
-        else:
-            flash('Invalid credentials.', 'error')
-    
-    return render_template('admin_login.html')
-
-@app.route("/admin/logout")
-def admin_logout():
-    session.clear()
-    return redirect(url_for('home'))
-
-@app.route("/admin/dashboard")
-def admin_dashboard():
-    if 'user_type' not in session or session['user_type'] != 'admin':
-        return redirect(url_for('admin_login'))
-    
-    # Get stats
-    total_students = query_db('SELECT COUNT(*) as count FROM students', one=True)['count']
-    total_hostels = query_db('SELECT COUNT(*) as count FROM hostels', one=True)['count']
-    total_bookings = query_db('SELECT COUNT(*) as count FROM bookings', one=True)['count']
-    pending_payments = query_db('SELECT COUNT(*) as count FROM payments WHERE verification_status = "pending"', one=True)['count']
-    
-    return render_template('admin_dashboard.html', 
-                         total_students=total_students,
-                         total_hostels=total_hostels,
-                         total_bookings=total_bookings,
-                         pending_payments=pending_payments)
-
-# Hostel listing
-@app.route("/hostels")
-def hostels():
-    hostels = query_db('SELECT * FROM hostels WHERE listing_status = "active"')
-    return render_template('hostel.html', hostels=hostels)
-
-@app.route("/hostel/<int:hostel_id>")
-def hostel_detail(hostel_id):
-    hostel = query_db('SELECT * FROM hostels WHERE id = ?', [hostel_id], one=True)
-    if not hostel:
-        flash('Hostel not found.', 'error')
-        return redirect(url_for('hostels'))
-    
-    reviews = query_db('SELECT r.*, s.name FROM reviews r JOIN students s ON r.student_id = s.id WHERE r.hostel_id = ?', [hostel_id])
-    avg_rating = query_db('SELECT AVG(rating) as avg FROM reviews WHERE hostel_id = ?', [hostel_id], one=True)['avg'] or 0
-    
-    return render_template('hostel_detail.html', hostel=hostel, reviews=reviews, avg_rating=round(avg_rating, 1))
-
-# Booking
-@app.route("/booking/<int:hostel_id>", methods=['GET', 'POST'])
-def booking(hostel_id):
-    if 'user_type' not in session or session['user_type'] != 'student':
-        return redirect(url_for('student_login'))
-    
-    hostel = query_db('SELECT * FROM hostels WHERE id = ?', [hostel_id], one=True)
-    if not hostel:
-        flash('Hostel not found.', 'error')
-        return redirect(url_for('hostels'))
-    
-    if request.method == 'POST':
-        insert_db('INSERT INTO bookings (student_id, hostel_id) VALUES (?, ?)', [session['user_id'], hostel_id])
-        flash('Booking request submitted!', 'success')
-        return redirect(url_for('my_bookings'))
-    
-    return render_template('booking.html', hostel=hostel)
-
-@app.route("/my-bookings")
-def my_bookings():
-    if 'user_type' not in session or session['user_type'] != 'student':
-        return redirect(url_for('student_login'))
-    
-    bookings = query_db('''
-        SELECT b.*, h.name, h.location, h.price 
-        FROM bookings b 
-        JOIN hostels h ON b.hostel_id = h.id 
-        WHERE b.student_id = ?
-    ''', [session['user_id']])
-    
-    return render_template('my_booking.html', bookings=bookings)
-
-# Reviews
-@app.route("/review/<int:hostel_id>", methods=['GET', 'POST'])
-def review(hostel_id):
-    if 'user_type' not in session or session['user_type'] != 'student':
-        return redirect(url_for('student_login'))
-    
-    hostel = query_db('SELECT * FROM hostels WHERE id = ?', [hostel_id], one=True)
-    if not hostel:
-        flash('Hostel not found.', 'error')
-        return redirect(url_for('hostels'))
-    
-    if request.method == 'POST':
-        rating = request.form['rating']
-        comment = request.form['comment']
-        insert_db('INSERT INTO reviews (student_id, hostel_id, rating, comment) VALUES (?, ?, ?, ?)',
-                 [session['user_id'], hostel_id, rating, comment])
-        flash('Review submitted!', 'success')
+            db.session.add(Review(student_id=session['user_id'], hostel_id=hostel_id, rating=rating, comment=request.form.get('comment','').strip())); db.session.commit(); flash('Review submitted.', 'success')
         return redirect(url_for('hostel_detail', hostel_id=hostel_id))
-    
-    return render_template('review_form.html', hostel=hostel)
 
-# Add hostel
-@app.route("/hostel-admin/add-hostel", methods=['GET', 'POST'])
-def add_hostel():
-    if 'user_type' not in session or session['user_type'] != 'hostel_admin':
-        return redirect(url_for('hostel_admin_login'))
-    
-    if request.method == 'POST':
-        name = request.form['name']
-        location = request.form['location']
-        price = request.form['price']
-        seats = request.form['seats']
-        room_type = request.form['room_type']
-        distance_km = request.form['distance_km']
-        description = request.form['description']
-        map_link = request.form['map_link']
-        
-        # Handle file upload
-        image_url = ''
-        if 'image' in request.files:
-            file = request.files['image']
-            if file.filename != '':
-                filename = secure_filename(file.filename)
-                file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
-                image_url = filename
-        
-        insert_db('''
-            INSERT INTO hostels (hostel_admin_id, name, location, price, seats, room_type, distance_km, description, image_url, map_link)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', [session['user_id'], name, location, price, seats, room_type, distance_km, description, image_url, map_link])
-        
-        flash('Hostel added successfully!', 'success')
+    @app.route('/hostel-admin/dashboard')
+    @role_required('hostel_admin')
+    def hostel_admin_dashboard():
+        hostels = Hostel.query.filter_by(hostel_admin_id=session['user_id']).order_by(Hostel.created_at.desc()).all()
+        bookings = Booking.query.join(Hostel).filter(Hostel.hostel_admin_id==session['user_id']).order_by(Booking.booking_date.desc()).all()
+        return render_template('owner_dashboard.html', hostels=hostels, bookings=bookings)
+
+    @app.route('/hostel-admin/add-hostel', methods=['GET','POST'])
+    @role_required('hostel_admin')
+    def add_hostel():
+        if request.method == 'POST':
+            try:
+                price=Decimal(request.form.get('price','0')); seats=int(request.form.get('seats','0')); distance=Decimal(request.form.get('distance_km','0') or '0')
+                if price < 0 or seats < 0 or distance < 0: raise ValueError
+            except (InvalidOperation, ValueError):
+                flash('Price, seats and distance must be valid non-negative values.', 'danger'); return render_template('hostel_form.html')
+            required = ['name','location','room_type']
+            if any(not request.form.get(x,'').strip() for x in required):
+                flash('Name, location and room type are required.', 'danger'); return render_template('hostel_form.html')
+            db.session.add(Hostel(hostel_admin_id=session['user_id'], name=request.form['name'].strip(), location=request.form['location'].strip(), price=price, seats=seats, room_type=request.form['room_type'].strip(), distance_km=distance, description=request.form.get('description','').strip(), image_url=request.form.get('image_url','').strip(), map_link=request.form.get('map_link','').strip()))
+            db.session.commit(); flash('Hostel submitted for administrator approval.', 'success'); return redirect(url_for('hostel_admin_dashboard'))
+        return render_template('hostel_form.html')
+
+    @app.route('/hostel-admin/booking/<int:booking_id>/<action>', methods=['POST'])
+    @role_required('hostel_admin')
+    def owner_booking_action(booking_id, action):
+        b=db.get_or_404(Booking, booking_id)
+        if b.hostel.hostel_admin_id != session['user_id']: return redirect(url_for('hostel_admin_dashboard'))
+        if action=='approve' and b.status=='pending': b.status='approved'
+        elif action=='reject' and b.status in ('pending','approved'): b.status='rejected'; b.hostel.seats += 1
+        else: flash('Invalid booking action.', 'warning'); return redirect(url_for('hostel_admin_dashboard'))
+        db.session.commit(); flash('Booking updated.', 'success'); return redirect(url_for('hostel_admin_dashboard'))
+
+    @app.route('/hostel-admin/payment/<int:hostel_id>', methods=['POST'])
+    @role_required('hostel_admin')
+    def payment(hostel_id):
+        hostel=Hostel.query.filter_by(id=hostel_id, hostel_admin_id=session['user_id']).first_or_404()
+        try: amount=Decimal(request.form.get('amount','0'))
+        except InvalidOperation: amount=Decimal('0')
+        if amount <= 0 or not request.form.get('payment_method','').strip():
+            flash('A valid amount and payment method are required.', 'danger')
+        else:
+            db.session.add(Payment(hostel_id=hostel.id, hostel_admin_id=session['user_id'], amount=amount, payment_method=request.form['payment_method'].strip(), transaction_ref=request.form.get('transaction_ref','').strip())); db.session.commit(); flash('Payment submitted for verification.', 'success')
         return redirect(url_for('hostel_admin_dashboard'))
-    
-    return render_template('add_hostel.html')
 
-# Payment
-@app.route("/hostel-admin/payment/<int:hostel_id>", methods=['GET', 'POST'])
-def payment(hostel_id):
-    if 'user_type' not in session or session['user_type'] != 'hostel_admin':
-        return redirect(url_for('hostel_admin_login'))
-    
-    hostel = query_db('SELECT * FROM hostels WHERE id = ? AND hostel_admin_id = ?', [hostel_id, session['user_id']], one=True)
-    if not hostel:
-        flash('Hostel not found.', 'error')
-        return redirect(url_for('hostel_admin_dashboard'))
-    
-    if request.method == 'POST':
-        amount = request.form['amount']
-        payment_method = request.form['payment_method']
-        transaction_ref = request.form['transaction_ref']
-        screenshot_note = request.form['screenshot_note']
-        
-        insert_db('''
-            INSERT INTO payments (hostel_id, hostel_admin_id, amount, payment_method, transaction_ref, screenshot_note)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', [hostel_id, session['user_id'], amount, payment_method, transaction_ref, screenshot_note])
-        
-        flash('Payment submitted for verification!', 'success')
-        return redirect(url_for('hostel_admin_dashboard'))
-    
-    return render_template('payment_page.html', hostel=hostel)
+    @app.route('/admin/dashboard')
+    @role_required('admin')
+    def admin_dashboard():
+        return render_template('admin_dashboard.html', students=Student.query.count(), hostels=Hostel.query.count(), bookings=Booking.query.count(), pending_payments=Payment.query.filter_by(verification_status='pending').count(), pending_hostels=Hostel.query.filter_by(listing_status='inactive').count())
 
-# Admin manage bookings
-@app.route("/admin/manage-bookings")
-def manage_bookings():
-    if 'user_type' not in session or session['user_type'] != 'admin':
-        return redirect(url_for('admin_login'))
-    
-    bookings = query_db('''
-        SELECT b.*, h.name as hostel_name, s.name as student_name, s.email as student_email
-        FROM bookings b
-        JOIN hostels h ON b.hostel_id = h.id
-        JOIN students s ON b.student_id = s.id
-    ''')
-    
-    return render_template('manage_booking.html', bookings=bookings)
+    @app.route('/admin/manage-bookings')
+    @role_required('admin')
+    def manage_bookings():
+        return render_template('admin_bookings.html', bookings=Booking.query.order_by(Booking.booking_date.desc()).all())
 
-# Admin manage payments
-@app.route("/admin/manage-payments")
-def manage_payments():
-    if 'user_type' not in session or session['user_type'] != 'admin':
-        return redirect(url_for('admin_login'))
-    
-    payments = query_db('''
-        SELECT p.*, h.name as hostel_name, ha.full_name as admin_name
-        FROM payments p
-        JOIN hostels h ON p.hostel_id = h.id
-        JOIN hostel_admins ha ON p.hostel_admin_id = ha.id
-    ''')
-    
-    return render_template('manage_payments.html', payments=payments)
+    @app.route('/admin/manage-payments')
+    @role_required('admin')
+    def manage_payments():
+        return render_template('admin_payments.html', payments=Payment.query.order_by(Payment.payment_date.desc()).all())
 
-@app.route("/admin/payment/<int:payment_id>/approve", methods=['POST'])
-def approve_payment(payment_id):
-    if 'user_type' not in session or session['user_type'] != 'admin':
-        return redirect(url_for('admin_login'))
-    
-    insert_db('UPDATE payments SET verification_status = "approved" WHERE id = ?', [payment_id])
-    insert_db('UPDATE hostels SET payment_status = "paid", listing_status = "active" WHERE id = (SELECT hostel_id FROM payments WHERE id = ?)', [payment_id])
-    flash('Payment approved!', 'success')
-    return redirect(url_for('manage_payments'))
+    @app.route('/admin/payment/<int:payment_id>/<action>', methods=['POST'])
+    @role_required('admin')
+    def payment_action(payment_id, action):
+        p=db.get_or_404(Payment,payment_id)
+        if action=='approve': p.verification_status='approved'; p.hostel.payment_status='paid'; p.hostel.listing_status='active'
+        elif action=='reject': p.verification_status='rejected'
+        else: flash('Invalid payment action.','warning'); return redirect(url_for('manage_payments'))
+        db.session.commit(); flash('Payment status updated.','success'); return redirect(url_for('manage_payments'))
 
-@app.route("/admin/payment/<int:payment_id>/reject", methods=['POST'])
-def reject_payment(payment_id):
-    if 'user_type' not in session or session['user_type'] != 'admin':
-        return redirect(url_for('admin_login'))
-    
-    insert_db('UPDATE payments SET verification_status = "rejected" WHERE id = ?', [payment_id])
-    flash('Payment rejected!', 'error')
-    return redirect(url_for('manage_payments'))
+    @app.route('/admin/hostel/<int:hostel_id>/<action>', methods=['POST'])
+    @role_required('admin')
+    def hostel_action(hostel_id, action):
+        h=db.get_or_404(Hostel,hostel_id)
+        if action=='approve': h.listing_status='active'
+        elif action=='disable': h.listing_status='inactive'
+        else: flash('Invalid listing action.','warning'); return redirect(url_for('admin_dashboard'))
+        db.session.commit(); flash('Hostel listing updated.','success'); return redirect(url_for('admin_dashboard'))
 
-# Admin manage reviews
-@app.route("/admin/manage-reviews")
-def manage_reviews():
-    if 'user_type' not in session or session['user_type'] != 'admin':
-        return redirect(url_for('admin_login'))
-    
-    reviews = query_db('''
-        SELECT r.*, h.name as hostel_name, s.name as student_name
-        FROM reviews r
-        JOIN hostels h ON r.hostel_id = h.id
-        JOIN students s ON r.student_id = s.id
-    ''')
-    
-    return render_template('manage_reviews.html', reviews=reviews)
+    return app
 
-@app.route("/admin/review/<int:review_id>/delete", methods=['POST'])
-def delete_review(review_id):
-    if 'user_type' not in session or session['user_type'] != 'admin':
-        return redirect(url_for('admin_login'))
-    
-    insert_db('DELETE FROM reviews WHERE id = ?', [review_id])
-    flash('Review deleted!', 'success')
-    return redirect(url_for('manage_reviews'))
+app = create_app()
 
-# Reports
-@app.route("/admin/reports")
-def reports():
-    if 'user_type' not in session or session['user_type'] != 'admin':
-        return redirect(url_for('admin_login'))
-    
-    # Sample report data
-    report_data = {
-        'total_hostels': query_db('SELECT COUNT(*) as count FROM hostels', one=True)['count'],
-        'active_hostels': query_db('SELECT COUNT(*) as count FROM hostels WHERE listing_status = "active"', one=True)['count'],
-        'total_bookings': query_db('SELECT COUNT(*) as count FROM bookings', one=True)['count'],
-        'pending_bookings': query_db('SELECT COUNT(*) as count FROM bookings WHERE status = "pending"', one=True)['count'],
-        'total_payments': query_db('SELECT SUM(amount) as total FROM payments WHERE verification_status = "approved"', one=True)['total'] or 0,
-    }
-    
-    return render_template('report_page.html', **report_data)
-
-# Student profile
-@app.route("/student/profile", methods=['GET', 'POST'])
-def student_profile():
-    if 'user_type' not in session or session['user_type'] != 'student':
-        return redirect(url_for('student_login'))
-    
-    if request.method == 'POST':
-        name = request.form['name']
-        phone = request.form['phone']
-        university = request.form['university']
-        
-        insert_db('UPDATE students SET name = ?, phone = ?, university = ? WHERE id = ?',
-                 [name, phone, university, session['user_id']])
-        flash('Profile updated!', 'success')
-        return redirect(url_for('student_profile'))
-    
-    user = query_db('SELECT * FROM students WHERE id = ?', [session['user_id']], one=True)
-    return render_template('student_profile.html', user=user)
-
-# Recommendations (simple implementation)
-@app.route("/recommend")
-def recommend():
-    if 'user_type' not in session or session['user_type'] != 'student':
-        return redirect(url_for('student_login'))
-    
-    # Simple recommendation: hostels not booked by the student
-    booked_hostels = query_db('SELECT hostel_id FROM bookings WHERE student_id = ?', [session['user_id']])
-    booked_ids = [b['hostel_id'] for b in booked_hostels]
-    
-    if booked_ids:
-        placeholders = ','.join('?' * len(booked_ids))
-        recommended = query_db(f'SELECT * FROM hostels WHERE listing_status = "active" AND id NOT IN ({placeholders})', booked_ids)
-    else:
-        recommended = query_db('SELECT * FROM hostels WHERE listing_status = "active"')
-    
-    return render_template('recommend.html', hostels=recommended)
-
-if __name__ == "__main__":
-    with app.app_context():
-        init_db()
-    app.run(debug=True)
+if __name__ == '__main__':
+    app.run(debug=False)

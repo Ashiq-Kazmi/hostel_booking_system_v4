@@ -1,2 +1,32 @@
-# hostel_booking_system_v4
-Hostel Booking System is a web-based platform developed to help students easily find, compare, and book hostels online. Students can search hostels, view details, book rooms, and give reviews. Hostel owners can register their hostels, upload details, and activate listings . The admin manages bookings, verifies , payment, review,management features.
+# HostelHub
+
+A production-oriented Flask hostel discovery and booking platform for students, hostel owners, and administrators.
+
+## Stack
+- Flask + Flask-SQLAlchemy
+- PostgreSQL in production (SQLite fallback for local development)
+- Gunicorn
+- Responsive custom UI
+- Werkzeug password hashing
+
+## Core workflows
+- Student registration/login and booking requests
+- Hostel owner registration, listings, booking management, and payment submissions
+- Administrator dashboard, listing approval, booking visibility, and payment verification
+- Hostel search, reviews, ratings, availability, and map links
+
+## Production setup
+Set these environment variables:
+- `SECRET_KEY`: long random secret
+- `DATABASE_URL`: PostgreSQL connection string
+- `ADMIN_USERNAME`: initial administrator username
+- `ADMIN_PASSWORD`: strong initial administrator password
+
+Install dependencies, then run:
+
+```bash
+flask --app app init-db
+gunicorn app:app
+```
+
+No demo users, demo hostels, or committed database are included.
